@@ -1,0 +1,5 @@
+
+void mainImage( out vec4 fragColor, in vec2 fragCoord ) {
+	fragColor = mix(texture(iChannel0, fragCoord.xy / iResolution.xy).rgba,
+                 texture(iChannel1, fragCoord.xy / iResolution.xy).rgba, 0.3);
+}

@@ -1,0 +1,526 @@
+
+//======================================================================
+//                            WORLD OBJECTS
+//======================================================================
+
+// Sphere (p-pos)^2 = r^2
+struct Sphere {
+  vec3 pos;
+  float r;
+};
+
+// implicit plane equation n*p-D=0
+struct Plane {
+  vec3 n;
+  float D;
+};
+struct Cylinder {
+    vec3 pos;
+    float h;
+    float r;
+};
+struct Torus {
+    vec3 pos;
+    float r;
+    float thickness;
+};
+// A collection of all objects
+struct World {
+    // Sphere subtracting from top of Rook
+    Sphere sphere;
+    Sphere sphere2;
+    Sphere sphere3;
+    Sphere sphere4;
+    
+    // Cylinders for Rook, 1 for body, two for top
+    Cylinder cylinder;
+    Cylinder cylinder2;
+    Cylinder cylinder3;
+    
+    // Torus's to make rings on Rook's body
+    Torus torus;
+    Torus torus1;
+    
+    // Scene Box
+    Plane plane;
+    Plane plane2;
+    Plane plane3;
+    Plane plane4;
+    Plane plane5;
+    Plane plane6;
+    
+    Cylinder cylinder02;
+    Cylinder cylinder22;
+    Cylinder cylinder32;
+    Torus torus02;
+    Torus torus12;
+    Sphere sphere02;
+    Sphere sphere22;
+    Sphere sphere32;
+    Sphere sphere42;
+    
+    
+};
+//======================================================================
+//                            CONSTANT VALUES
+//======================================================================
+
+// Constants for ambient and shadow strength
+float ambientDist = 0.35;
+float shadowConst = 22.;
+
+const float pi = 3.14159265358;
+
+// Marching constants
+int maxMarchingSteps = 50;
+float minMarchRadius = 0.0015;
+
+// Lowering the number of reflections means you should increase the fallOff
+// Otherwise, you will see the original colors of the walls off in the distance
+float reflectionCount = 40.;
+float reflectionFallOff = 0.01;
+
+// I recommend using these reflection variables on laptops, use above values for desktop
+//float reflectionCount = 8.;
+//float reflectionFallOff = 0.058;
+
+// Determines the number of extra rays for anti-aliasing between 0. and 3.
+// For laptops 0. or 1. is recommended
+// For desktops 2. is recommended
+float antiAliasing = 2.;
+
+
+// Applying antiAliasing to reflections that are very far out is costly without
+// being very noticeable. This limits those reflections.
+// This should always be <= reflectionCount
+float antiAliasingReflections = 10.;
+
+World w;
+
+
+//======================================================================
+//                MARCHING FUNCTIONS FOR DRAWING OBJECTS
+//======================================================================
+
+// Distance from point to sphere surface:
+// Find the length from the point to the sphere center
+// Subtract the radius
+// Similar to what has been done in class
+float sdfSphere(vec3 position, Sphere s)
+{
+    return length(position-s.pos)-s.r;
+}
+
+// Distance from point to plane surface:
+// This one works because position is not a unit vector, this means the
+// result of the dot product will be the perpendicular distance from
+// the plane (assumed to be at (0, 0, 0)) to the point
+// To account for that assumption, add the plane's distance scalar
+// Similar to what has been done in class
+float sdfPlane(vec3 position, Plane p) {
+    return dot(p.n, position) + p.D;
+}
+
+// Distance from point to Torus surface
+float sdfTorus(vec3 position, Torus t)
+{
+    // Find the horizontal length to the center of the Torus
+    // Subtract the radius of the Torus to find the distance to the radius
+    float horizontalDistToRadius = length(position.xy - t.pos.xy) - t.r;
+    
+    // Now find the vertical length to Torus, just use the center since it is horizontal
+    float verticalDistToCenter = position.z - t.pos.z;
+    
+    // Now just use pythagorean theorem and subtract the thickness of the Torus
+    return sqrt(horizontalDistToRadius * horizontalDistToRadius +
+                verticalDistToCenter * verticalDistToCenter) - t.thickness;
+}
+
+// Distance from point to Cylinder surface
+// The following function is a slight modification from this source:
+// https://iquilezles.org/articles/distfunctions/
+float sdfCylinder(vec3 position, Cylinder c) 
+{
+  vec2 d = abs(vec2(length(position.xy-c.pos.xy),position.z-c.pos.z)) - vec2(c.r,c.h);
+  return min(max(d.x,d.y),0.0) + length(max(d,0.0));
+}
+
+// By checking the minimum with a negative value, we can essentially use one
+// object to cut into another (since the negative allows us to go into an object)
+// This is similar to the resource below,
+// except mine allows the cut to be a different material.
+// https://www.shadertoy.com/view/NsjSR3
+vec2 mergeSubtract(vec2 d2, vec2 d1) {
+    return max(d1.x, -d2.x) == d1.x ?  d2 : vec2(-d1.x, d1.y);
+}
+
+// Merge two objects in a smooth manner based on a constant k
+// The following function is entirely from this source:
+// https://iquilezles.org/articles/smin/
+float smin(float a, float b, float k )
+{
+    float h = max( k-abs(a-b), 0.0 )/k;
+    return min( a, b ) - h*h*h*k*(1.0/6.0);
+}
+
+// This functions essentially checks a position against every object
+// in the scene and returns the smallest distance, and the id of that object
+vec2 distToNearestObj(vec3 position) {
+    // Set current result to default values
+    vec2 current = vec2(1000., -1);
+    
+    // Calculate distances to each object in scene
+    float planeDist = sdfPlane(position, w.plane);
+    float plane2Dist = sdfPlane(position, w.plane2);
+    float plane3Dist = sdfPlane(position, w.plane3);
+    float plane4Dist = sdfPlane(position, w.plane4);
+    float plane5Dist = sdfPlane(position, w.plane5);
+    float plane6Dist = sdfPlane(position, w.plane6);
+    
+    
+    
+    // This bound is used to avoid calculating the rook whenever we know it will be unnecessary
+    // The bound is large enough to ensure a negative result whenever we may want to render the rook
+    // Even though calculations are only skipped for a small portion of the rays, this can result in about
+    // a 10 fps increase when I tested the difference on my laptop
+    float cylBound = sdfCylinder(position, Cylinder(vec3(0.0, -0.4, 1.55), 1.55, 1.45)); 
+    if(cylBound < 0.){
+        // Calculate distances to each object in scene
+        float sphereDist = sdfSphere(position, w.sphere);
+        float sphere2Dist = sdfSphere(position, w.sphere2);
+        float sphere3Dist = sdfSphere(position, w.sphere3);
+        float sphere4Dist = sdfSphere(position, w.sphere4);
+        float cylinderDist = sdfCylinder(position, w.cylinder);
+        float cylinder2Dist = sdfCylinder(position, w.cylinder2);
+        float cylinder3Dist = sdfCylinder(position, w.cylinder3);
+        float torusDist = sdfTorus(position, w.torus);
+        float torus1Dist = sdfTorus(position, w.torus1);
+        
+        // Calculate distances from equations between objects
+        float bottomOfRook = smin(torus1Dist, cylinderDist, 0.7);
+        vec2 topRingOfRook = mergeSubtract(vec2(smin(cylinder2Dist, cylinderDist, 0.33), 1.), vec2(cylinder3Dist, 1.));
+
+        vec2 topRingCut = mergeSubtract(topRingOfRook, vec2(sphere2Dist, 1.));
+        topRingCut = max(topRingCut, mergeSubtract(topRingOfRook, vec2(sphereDist, 1.)));
+        topRingCut = max(topRingCut, mergeSubtract(topRingOfRook, vec2(sphere3Dist, 1.)));
+        topRingCut = max(topRingCut, mergeSubtract(topRingOfRook, vec2(sphere4Dist, 1.)));
+
+
+        current = vec2(smin(torusDist, cylinderDist, 0.7), 1.);
+
+        if(bottomOfRook < current.x)
+            current = vec2(bottomOfRook, 1.);
+
+        if(topRingCut.x < current.x)
+            current = topRingCut;
+
+        float cylBoundMini = sdfCylinder(position, Cylinder(vec3(0.1, -0.4, 1.25), 0.5, 0.4));
+        if(cylBoundMini < 0.){
+            // Calculate distances to each object in scene
+            float sphere02Dist = sdfSphere(position, w.sphere02);
+            float sphere22Dist = sdfSphere(position, w.sphere22);
+            float sphere32Dist = sdfSphere(position, w.sphere32);
+            float sphere42Dist = sdfSphere(position, w.sphere42);
+            float cylinder02Dist = sdfCylinder(position, w.cylinder02);
+            float cylinder22Dist = sdfCylinder(position, w.cylinder22);
+            float cylinder32Dist = sdfCylinder(position, w.cylinder32);
+            float torus02Dist = sdfTorus(position, w.torus02);
+            float torus12Dist = sdfTorus(position, w.torus12);
+            
+            // Calculate distances from equations between objects
+            float bottomOfRook2 = smin(torus12Dist, cylinder02Dist, 0.7/5.);
+            vec2 topRingOfRook2 = mergeSubtract(vec2(smin(cylinder22Dist, cylinder02Dist, 0.33/5.), 1.),
+                                                vec2(cylinder32Dist, 1.));
+
+            vec2 topRingCut2 = mergeSubtract(topRingOfRook2, vec2(sphere22Dist, 1.));
+            topRingCut2 = max(topRingCut2, mergeSubtract(topRingOfRook2, vec2(sphere02Dist, 1.)));
+            topRingCut2 = max(topRingCut2, mergeSubtract(topRingOfRook2, vec2(sphere32Dist, 1.)));
+            topRingCut2 = max(topRingCut2, mergeSubtract(topRingOfRook2, vec2(sphere42Dist, 1.)));
+
+
+            if(smin(torus02Dist, cylinder02Dist, 0.7/5.) < current.x)
+                current = vec2(smin(torus02Dist, cylinder02Dist, 0.7/5.),1.);
+
+            if(bottomOfRook2 < current.x)
+                current = vec2(bottomOfRook2, 1.);
+
+            if(topRingCut2.x < current.x)
+                current = topRingCut2;
+
+        }
+    }
+    
+    // Render all the walls (each has a different material for different colors)
+    if(planeDist < current.x) current = vec2(planeDist, 2);
+    if(plane2Dist < current.x) current = vec2(plane2Dist, 3);
+    if(plane3Dist < current.x) current = vec2(plane3Dist, 4);
+    if(plane4Dist < current.x) current = vec2(plane4Dist, 5);
+    if(plane5Dist < current.x) current = vec2(plane5Dist, 6);
+    if(plane6Dist < current.x) current = vec2(plane6Dist, 7);
+    
+    return current;
+}
+
+// The main ray-marching function
+// The idea for how this function operates is based off of this source:
+// https://www.cl.cam.ac.uk/teaching/1819/FGraphics/1.%20Ray%20Marching%20and%20Signed%20Distance%20Fields.pdf
+vec2 march(vec3 ro, vec3 rd) {
+    float dist = 0.005;
+    vec2 stepInfo;
+    // Loop to continually march forward a set number of times
+    for(int i = 0; i < maxMarchingSteps; i++) {
+        // Get the distance to the nearest object and its id number
+        stepInfo = distToNearestObj(ro + rd * dist);
+        dist += stepInfo.x; // Add the distance of this step to our overall distance traveled
+        
+        if(stepInfo.x <= minMarchRadius) // If we have hit an object, return the gathered info
+            return vec2(dist, stepInfo.y);
+    }
+    return vec2(dist, stepInfo.y); // Exceeded max steps, return closest info
+}
+
+//======================================================================
+//                      LIGHTING AND RENDERING
+//======================================================================
+
+// This entire function is based on this source:
+// https://iquilezles.org/articles/normalsSDF/
+vec3 findNormal(in vec3 position) {
+    vec2 epsilon = vec2(0.001, 0.0);
+    return normalize(vec3(
+          distToNearestObj(position + epsilon.xyy).x - distToNearestObj(position - epsilon.xyy).x,
+          distToNearestObj(position + epsilon.yxy).x - distToNearestObj(position - epsilon.yxy).x,
+          distToNearestObj(position + epsilon.yyx).x - distToNearestObj(position - epsilon.yyx).x));
+}
+
+// From Assignment 2
+vec3 checkerTex(vec2 coord) { 
+   float total = floor(coord.x) + floor(coord.y);
+   bool isEven = mod(total, 2.0) == 0.0;
+   return (mod(total, 2.0) == 0.0)?vec3(1.):vec3(0.); 
+}
+
+// Calculate shadow constant
+// Based off of the following source:
+// https://www.cl.cam.ac.uk/teaching/1819/FGraphics/1.%20Ray%20Marching%20and%20Signed%20Distance%20Fields.pdf
+float shadowMarch(vec3 ro, vec3 rd, float distToLight) {
+    float dist = 0.005;
+    float finalShadow = 1.;
+    // March until we have made it to the light
+    while(dist < distToLight) {
+        // Get the distance to the nearest object
+        float stepDist = distToNearestObj(ro + rd * dist).x;
+        dist += stepDist; // Add the distance of this step to our overall distance traveled
+        
+        if(stepDist <= minMarchRadius) // If we have hit an object, 100% shadow
+            return 0.;
+            
+        // The shadow will be proportionate to however close the ray was to hitting an object
+        // It will also have a stronger affect the closer the object casting the shadow is
+        float stepShadow = shadowConst * stepDist / dist;
+        
+        // We always want the darkest shadow found along the path
+        if(stepShadow < finalShadow)
+            finalShadow = stepShadow;
+    }
+    return finalShadow;
+}
+
+// Determines ambient factor by using one check for nearest object
+// Use that distance and subtract ambientDist from it. Add 1.075 so it doesn't get too dark
+// Clamp to 1. so that it only makes things darker
+float ambient(vec3 point, vec3 norm) {
+    float checkRadius = 0.3;
+    float dist = distToNearestObj(point + norm * ambientDist).x;
+    return clamp(dist - ambientDist + 1.075, 0., 1.);
+}
+
+// Returns the phong equation for a given direction to a camera, 
+// direction to a light, and normal for a surface
+vec3 phongEquation(vec3 rd, vec3 light_dir, vec3 normal, float id, vec3 point) {
+  vec3 R = reflect(-rd, normal);
+  
+  // values for lighting
+  float d = 0.6;
+  float spec = 0.1;
+  
+  vec3 out_color;
+  // For the wooden chesspiece, we need to choose which coords to use to avoid stretching
+  // My solution to this is relying on the values of the normal to tell us what way we are facing
+  // And mixing between which coords we use for the wood texture, this is nice b/c normals will be 0-1
+  // when we take their absolute value
+  if(id == 1.) {
+      out_color = mix(texture(iChannel0, vec2(point.x, point.z)).rgb, 
+                      texture(iChannel0, vec2(point.x, point.y)).rgb, abs(normal.z));
+      out_color = mix(out_color, texture(iChannel0, vec2(point.y, point.z)).rgb, abs(normal.x));
+      d = 0.45;
+      spec = 0.045;
+  }else if(id == 2.) {
+      // These control the direction and speed of the chess board's movement
+      float s = sin((iTime-(pi/2.))/4.+3.25*pi/2.)*6.;
+      float c = cos(iTime/4.)*6.;
+      if(s < 0.) s = 1.;
+      if(c < 0.) c = 1.;
+      float xpoint = s*6.+point.x*0.9+0.5;
+      float ypoint = c*6.+point.y*0.9-0.14;
+      
+      // This determines how dark each square is
+      vec3 checkerVal = clamp((checkerTex(vec2(xpoint, ypoint))), 0.4, 1.);
+      // This changes the direction of the grain of the wood based on its' darkness
+      vec3 grainDir = mix(texture(iChannel0, vec2(xpoint, ypoint)).rgb,
+                          texture(iChannel0, vec2(ypoint, xpoint)).rgb, checkerVal);
+      out_color = grainDir * checkerVal + vec3(0.06, 0., 0.01);
+      d = 0.45;
+      spec = 0.055;
+  }
+  else if(id == 3. || id == 7.) out_color = vec3(0.0, 0., 0.5);
+  else if(id == 4.) out_color = vec3(0.5, 0., 0.0);
+  else if(id == 5.) out_color = vec3(0.0, 0.5, 0.0);
+  else if(id == 6.) out_color = vec3(0.5, 0.5, 0.0);
+  out_color += d*max(0.0,dot(normal, light_dir))*vec3(1.0); 
+  out_color += spec*pow(max(0.0,dot(light_dir, R)),10.)*vec3(10.0); 
+  
+  return out_color;
+}
+
+void mainImage( out vec4 fragColor, in vec2 fragCoord ) {
+    
+    // screen uv in (-1, 1)
+	vec2 uv = fragCoord.xy / iResolution.xy * 2.0 - 1.0;
+    vec3 light = vec3(cos(iTime/2.), sin(iTime/2.), 1.5);
+    // Rays from camera
+    // depth from optical center to image plane
+    float d = 2.0;
+    vec3 ray_origin = vec3(cos(iTime * -0.2) * d, sin(iTime * -0.2) * d, 0.5*cos(iTime/6.)*cos(iTime/6.)+1.05);
+    vec3 target = vec3(0.0, 0.0, .8);
+    
+    vec3 up = vec3(0.0,0.0,1.0);
+    vec3 cam_forward = normalize(target - ray_origin);
+    vec3 cam_right = normalize(cross(cam_forward, up));
+    vec3 cam_up = normalize(cross(cam_forward, cam_right));
+    
+    vec3 ray_direction = normalize(uv.x * (iResolution.x / iResolution.y) * cam_right - uv.y * cam_up + 2.0 * cam_forward);
+    
+    
+    // Declare all objects here
+    w.plane = Plane(vec3(0.0,0.0,1.0),0.0); 
+    w.plane2 = Plane(vec3(1.0,0.0,0.0),2.0); 
+    w.plane3 = Plane(vec3(0.0,-1.0,0.0),2.0); 
+    w.plane4 = Plane(vec3(-1.0,0.0,0.0),2.0);
+    w.plane5 = Plane(vec3(0.0,1.0,0.0),2.0);
+    w.plane6 = Plane(vec3(0.0,0.0,-1.0),3.0); 
+    w.cylinder = Cylinder(vec3(0.0, -0.4, 0.5), 0.5, 0.23);
+    w.cylinder2 = Cylinder(vec3(0.0, -0.4, 1.08), 0.05, 0.3);
+    w.cylinder3 = Cylinder(vec3(0.0, -0.4, 1.14), 0.1, 0.25);
+    w.torus = Torus(vec3(0.0, -0.4, 0.15), 0.27, 0.015);
+    w.torus1 = Torus(vec3(0.0, -0.4, 0.07), 0.39, 0.025);
+    w.sphere = Sphere(vec3(-0.28, -0.4, 1.12),0.07);
+    w.sphere2 = Sphere(vec3(0.28, -0.4, 1.12),0.07);
+    w.sphere3 = Sphere(vec3(0.0, -0.12, 1.12),0.07);
+    w.sphere4 = Sphere(vec3(0.0, -0.68, 1.12),0.07);
+    
+    // To simulate the chess piece moving based on floor movement
+    float s = sin((iTime-(pi/2.))/4.+3.25*pi/2.)/8.;
+    float c = cos(iTime/4.)/8.;      
+      
+    if(s < 0.) s = 0.;
+    if(c < 0.) c = 0.;
+      
+    w.cylinder02 = Cylinder(vec3(0.0 - s, -0.4 - c, 1.15), 0.1, 0.23/5.);
+    w.cylinder22 = Cylinder(vec3(0.0 - s, -0.4 - c, 1.266), 0.05/5., 0.3/5.);
+    w.cylinder32 = Cylinder(vec3(0.0 - s, -0.4 - c, 1.278), 0.1/5., 0.25/5.);
+    w.torus02 = Torus(vec3(0.0 - s, -0.4 - c, 1.08), 0.27/5., 0.015/5.);
+    w.torus12 = Torus(vec3(0.0 - s, -0.4 - c, 1.064), 0.39/5., 0.025/5.);
+    w.sphere02 = Sphere(vec3(-0.056 - s, -0.4 - c, 1.274),0.07/5.);
+    w.sphere22 = Sphere(vec3(0.056 - s, -0.4 - c, 1.274),0.07/5.);
+    w.sphere32 = Sphere(vec3(0.0 - s, -0.344 - c, 1.274),0.07/5.);
+    w.sphere42 = Sphere(vec3(0.0 - s, -0.456 - c, 1.274),0.07/5.);
+    
+    
+    
+    // Constants for setting color
+    vec3 color = vec3(0);
+    vec3 leftcolor = vec3(0);
+    float offset = 0.;
+    // For anti-aliasing, we repeat the inner process 3 times, once at the center of a pixel
+    // and twice at a small offset in opposite directions (using noise to randomize it slightly)
+    // Any more than two extra times costs too much
+    for(float j = 0.; j < antiAliasing + 1.; j++){
+        if(j == 1.) offset = 1./iResolution.x * (2.*(texture(iChannel1, uv.xy*50.).r)+ 0.3);
+        if(j == 2.) offset *= -1.;
+        ray_origin = vec3(cos(iTime * -0.2) * d, sin(iTime * -0.2) * d, 0.7*cos(iTime/6.)*cos(iTime/6.)+1.05);
+        ray_direction = normalize((uv.x+offset) * (iResolution.x / iResolution.y) * cam_right - (uv.y+offset)
+                                   * cam_up + 2.0 * cam_forward);
+        vec3 tmpCol = vec3(0);
+
+        for(float i = 0.; i < reflectionCount; i++){
+        
+            // shoot the ray
+            vec2 res = march(ray_origin, ray_direction);
+            // point the ray hit    
+            vec3 point = ray_origin + res.x * ray_direction;
+
+            // calculate direction to the light and normal at point
+            vec3 lightDir = normalize(light - point);
+            vec3 norm;
+            
+            // Minor performance boost from only using the findNormal function when
+            // the point is not on a flat surface, since findNormal is costly to run
+            if(res.y < 2.) norm = findNormal(point);
+            else if(res.y == 2.) norm = vec3(0.0,0.0,1.0);
+            else if(res.y == 3.) norm = vec3(1.0,0.0,0.0);
+            else if(res.y == 4.) norm = vec3(0.0,-1.0,0.0);
+            else if(res.y == 5.) norm = vec3(-1.0,0.0,0.0);
+            else if(res.y == 6.) norm = vec3(0.0,1.0,0.0);
+            else if(res.y == 7.) norm = vec3(0.0,0.0,-1.0);
+
+            // Color has to be set in two steps
+            // If this ray is the first ray being shot, set the initial color of the pixel
+            if(i < 1.)
+                tmpCol = phongEquation(ray_direction, lightDir, norm, res.y, point);
+            else
+            // For all rays after the first, do two things:
+            // subtract a small amount proportionate to the number of reflections to create a fading effect
+            // instead of completely resetting color, preserve some of it each iteration, this creates
+            //    a cool color combo effect inbetween mirror reflections
+                tmpCol = tmpCol * 0.4 + phongEquation(ray_direction, lightDir, norm, res.y, point) * 0.6
+                                                                         - (reflectionFallOff * i + 0.1);
+
+            // Apply ambient factor
+            tmpCol *= ambient(point, norm);
+            
+            // calculate shadows (add a small amount to avoid pitch black, don't compute shadows for mirrors)
+            // Break because we only want to continue reflecting if we are continuously hitting mirrors
+            // Hitting an object means that object is what will be reflected
+            if(res.y < 3.){
+                tmpCol *= shadowMarch(point + norm * 0.0029, lightDir, length(light - point)) + .12;
+                break;
+            }
+
+
+            // Only apply anti-Aliasing to a certain number of reflections
+            if(j > 0. && i > antiAliasingReflections) {
+                tmpCol = color;
+                break;
+            }
+            // The last reflection should be black, this compliments the fading we do earlier
+            if(i == reflectionCount - 1.){
+                tmpCol = vec3(0.);
+            }else { // Don't bother with these two calculations if on the last reflection
+                // Create a reflection by setting a new origin point (adding some of the norm
+                // as always to avoid hitting itself on the next iteration), direction using reflect
+                ray_origin = point + norm * 0.0005;
+                ray_direction = reflect(ray_direction, norm);
+            }
+        }
+        // Setting color like this ensures an even mix
+        if(j == 0.) color = tmpCol;
+        else if(j == 1.) leftcolor = tmpCol;
+        else color = 0.34 * color + 0.33 * leftcolor + 0.33 * tmpCol;
+    }
+    
+    // motion blur
+    color = mix(color, texture(iChannel2, fragCoord.xy / iResolution.xy).rgb, 0.5);
+    fragColor = vec4(color, 1.);
+    
+}
